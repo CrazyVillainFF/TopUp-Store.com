@@ -1,4 +1,4 @@
-﻿import { initializeApp } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-app.js";
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-app.js";
 import { getAuth, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, updateProfile, sendPasswordResetEmail } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-auth.js";
 import { getFirestore, doc, getDoc, setDoc, updateDoc, collection, addDoc, increment, serverTimestamp } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-firestore.js";
 
@@ -18,7 +18,7 @@ export const db = getFirestore(app);
 
 export const TopupData = {
   upiId: "vishnubangaru001@oksbi",
-  paymentQr: "image/payment-qr.jpg",
+  paymentQr: "https://www.image2url.com/r2/default/images/1780973417517-83563c52-0ee0-4d1a-9ac1-1ee2c0b0b008.jpg",
   games: {
     freefire: { name: "Free Fire", item: "Diamonds", logo: "image/freefire.png", page: "freefire.html", description: "Fast diamond packs for Free Fire accounts with UPI checkout.", bundles: [{ label: "100 Diamonds", amount: 79 }, { label: "310 Diamonds", amount: 240 }, { label: "520 Diamonds", amount: 399 }, { label: "1060 Diamonds", amount: 799 }] },
     bgmi: { name: "BGMI", item: "UC", logo: "image/bgmi.jpg", page: "bgmi.html", description: "Reliable BGMI UC packs with Firestore order tracking.", bundles: [{ label: "60 UC", amount: 75 }, { label: "325 UC", amount: 380 }, { label: "660 UC", amount: 750 }, { label: "1800 UC", amount: 1850 }] },
@@ -27,13 +27,13 @@ export const TopupData = {
   }
 };
 
-let currentUser = null;
+let currentUser = undefined;
 let currentProfileCache = null;
 export const authReady = new Promise((resolve) => onAuthStateChanged(auth, (user) => { currentUser = user; resolve(user); }));
 onAuthStateChanged(auth, async (user) => {
   currentUser = user;
   currentProfileCache = null;
-  await updateHeaderFromAuth();
+  updateHeaderFromAuth();
 });
 
 function withTimeout(promise, message = "Request timed out. Check Firebase setup and internet connection.", ms = 12000) {
@@ -80,19 +80,15 @@ export async function createAccount(username, email, password) {
   try {
     const credential = await withTimeout(createUserWithEmailAndPassword(auth, email, password), "Signup timed out. Check Email/Password provider.");
     await updateProfile(credential.user, { displayName: username });
-    try {
-      await withTimeout(setDoc(doc(db, "users", credential.user.uid), {
-        uid: credential.user.uid,
-        username,
-        usernameLower: username.toLowerCase(),
-        email: credential.user.email,
-        points: 0,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp()
-      }), "Account created, but Firestore profile save timed out.");
-    } catch (profileError) {
-      return { ok: true, warning: authMessage(profileError) };
-    }
+    setDoc(doc(db, "users", credential.user.uid), {
+      uid: credential.user.uid,
+      username,
+      usernameLower: username.toLowerCase(),
+      email: credential.user.email,
+      points: 0,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    }).catch((error) => console.warn("Profile save failed", error));
     return { ok: true };
   } catch (error) {
     return { ok: false, message: authMessage(error) };
@@ -101,8 +97,8 @@ export async function createAccount(username, email, password) {
 
 export async function loginAccount(email, password) {
   try {
-    const credential = await withTimeout(signInWithEmailAndPassword(auth, email, password), "Login timed out. Check Firebase Authentication.");
-    try { await ensureUserProfile(credential.user); } catch (profileError) { console.warn("Profile load failed", profileError); }
+    const credential = await withTimeout(signInWithEmailAndPassword(auth, email, password), "Login timed out. Check Firebase Authentication.", 6000);
+    ensureUserProfile(credential.user).catch((profileError) => console.warn("Profile load failed", profileError));
     return { ok: true };
   } catch (error) {
     return { ok: false, message: authMessage(error) };
@@ -118,6 +114,23 @@ export async function resetPassword(email) {
   } catch (error) {
     return { ok: false, message: authMessage(error) };
   }
+}
+
+export function showLoading(message = "Loading...") {
+  let loader = document.querySelector("[data-page-loader]");
+  if (!loader) {
+    loader = document.createElement("div");
+    loader.className = "page-loader";
+    loader.dataset.pageLoader = "";
+    loader.innerHTML = `<div class="loader-card"><span class="big-spinner"></span><strong data-loader-message></strong></div>`;
+    document.body.appendChild(loader);
+  }
+  loader.querySelector("[data-loader-message]").textContent = message;
+  loader.classList.add("open");
+}
+
+export function hideLoading() {
+  document.querySelector("[data-page-loader]")?.classList.remove("open");
 }
 
 export async function currentProfile() {
@@ -161,19 +174,23 @@ function showPaymentPanel(order) {
           <strong>${money(order.amount)}</strong>
           <p>${order.game} - ${order.bundle}</p>
           <p>Player ID: ${order.playerId}</p>
-          <p>UPI ID: <b>${TopupData.upiId}</b></p>
         </div>
       </div>
       <div class="reward-notice">
         Pay to this QR code. Your reward will be added within 12hr after payment confirmation.
       </div>
+      <div class="notice" data-payment-status>
+        ${auth.currentUser ? "Saving your order in your profile..." : "Login or sign up to save this order in your profile."}
+      </div>
       <div class="payment-actions">
-        <a class="link-btn primary full" href="${upiLink(order)}">Open UPI Payment App</a>
+        <a class="link-btn primary full" href="${upiLink(order)}">Pay with UPI App</a>
+        ${auth.currentUser ? "" : '<a class="link-btn full" href="login.html">Login / Sign Up</a>'}
         <button class="btn ghost full" data-close-payment>Done</button>
       </div>
     </div>`;
   document.body.appendChild(modal);
   modal.querySelectorAll("[data-close-payment]").forEach((button) => button.addEventListener("click", () => modal.remove()));
+  return modal;
 }
 
 export async function saveOrder(order) {
@@ -185,9 +202,32 @@ export async function saveOrder(order) {
   await withTimeout(addDoc(collection(db, "orders"), { ...order, uid: user.uid, username: profile.username, email: user.email, pointsEarned, status: "pending_payment", createdAt: serverTimestamp() }), "Could not save order in Firestore.");
 }
 
+async function saveOrderIfLoggedIn(order, modal) {
+  if (!auth.currentUser) return;
+  const status = modal?.querySelector("[data-payment-status]");
+  try {
+    await saveOrder(order);
+    await refreshPoints();
+    if (status) status.textContent = "Order saved in your profile. Complete the payment to receive your reward within 12hr.";
+  } catch (error) {
+    if (status) status.textContent = error.message || "QR is shown, but the order could not be saved in your profile.";
+  }
+}
+
 function navHtml(active) {
   const nav = [["index", "Home", "index.html"], ["freefire", "Free Fire", "freefire.html"], ["bgmi", "BGMI", "bgmi.html"], ["pubg", "PUBG", "pubg.html"], ["cod", "Call of Duty", "cod.html"]];
   return nav.map(([key, label, href]) => `<a class="${active === key ? "active" : ""}" href="${href}">${label}</a>`).join("");
+}
+
+function escapeHtml(value) {
+  return String(value || "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
+}
+
+function profileAvatar(user, label) {
+  const photo = user?.photoURL || "";
+  const initial = (label || user?.email || "U").trim().charAt(0).toUpperCase();
+  if (photo) return `<img class="profile-avatar" src="${escapeHtml(photo)}" alt="${escapeHtml(label)} profile photo" referrerpolicy="no-referrer">`;
+  return `<span class="profile-avatar profile-avatar-fallback" aria-label="${escapeHtml(label)} profile photo">${escapeHtml(initial)}</span>`;
 }
 
 function headerShell(active, authHtml) {
@@ -199,28 +239,43 @@ function bindSignOut(header) {
   if (logout) logout.addEventListener("click", async () => { await logoutAccount(); window.location.href = "login.html"; });
 }
 
-async function updateHeaderFromAuth() {
+function authHtmlForUser(user, profile = null) {
+  const label = profile?.username || user.displayName || user.email || "Profile";
+  const email = user.email || "";
+  const points = Number(profile?.points) || 0;
+  return `<div class="profile-chip">${profileAvatar(user, label)}<span class="profile-copy"><strong>${escapeHtml(label)}</strong><small>${escapeHtml(email)}</small></span></div><span class="points-pill" data-points>${points} pts</span><button class="btn ghost" data-logout>Logout</button>`;
+}
+
+function updateHeaderFromAuth() {
   const header = document.querySelector("[data-header]");
   if (!header) return;
   const active = header.dataset.active || "index";
   const guest = `<a class="link-btn" href="login.html">Login</a><a class="link-btn primary" href="signup.html">Sign Up</a>`;
+  if (currentUser === undefined) {
+    header.innerHTML = headerShell(active, `<span class="auth-loading"><span class="mini-spinner"></span> Checking login...</span>`);
+    return;
+  }
   if (!currentUser) {
     header.innerHTML = headerShell(active, guest);
     return;
   }
-  let profile = null;
-  try { profile = await ensureUserProfile(currentUser); } catch (error) { console.warn("Profile load failed", error); }
-  const label = profile?.username || currentUser.displayName || currentUser.email || "Profile";
-  const points = Number(profile?.points) || 0;
-  header.innerHTML = headerShell(active, `<span class="user-pill">${label}</span><span class="points-pill" data-points>${points} pts</span><button class="btn ghost" data-logout>Sign Out</button>`);
+  const userForHeader = currentUser;
+  header.innerHTML = headerShell(active, authHtmlForUser(userForHeader));
   bindSignOut(header);
+  withTimeout(ensureUserProfile(userForHeader), "Profile load skipped.", 5000)
+    .then((profile) => {
+      if (!auth.currentUser || auth.currentUser.uid !== userForHeader.uid) return;
+      header.innerHTML = headerShell(active, authHtmlForUser(userForHeader, profile));
+      bindSignOut(header);
+    })
+    .catch((error) => console.warn("Profile load failed", error));
 }
 
 export function renderHeader(active) {
   const header = document.querySelector("[data-header]");
   if (!header) return;
   header.dataset.active = active;
-  header.innerHTML = headerShell(active, `<a class="link-btn" href="login.html">Login</a><a class="link-btn primary" href="signup.html">Sign Up</a>`);
+  header.innerHTML = headerShell(active, `<span class="auth-loading"><span class="mini-spinner"></span> Checking login...</span>`);
   updateHeaderFromAuth();
 }
 
@@ -283,10 +338,9 @@ export function initOrderModal() {
     const game = TopupData.games[currentKey];
     const selected = game.bundles[Number(bundle.value)];
     const order = { game: game.name, item: game.item, bundle: selected.label, playerId: player.value.trim(), phone: phone.value.trim() || "Not provided", amount: discounted(selected.amount, offer.checked) };
-    try {
-      await saveOrder(order); await refreshPoints(); modal.classList.remove("open");
-      showPaymentPanel(order);
-    } catch (error) { alert(error.message || "Could not save order."); }
+    modal.classList.remove("open");
+    const paymentModal = showPaymentPanel(order);
+    saveOrderIfLoggedIn(order, paymentModal);
   });
 }
 
@@ -323,10 +377,8 @@ export function initGamePage(gameKey) {
     if (bundle.value === "") { alert("Please select a bundle."); return; }
     const selected = game.bundles[Number(bundle.value)];
     const order = { game: game.name, item: game.item, bundle: selected.label, playerId: player.value.trim(), phone: phone.value.trim() || "Not provided", amount: discounted(selected.amount, offer.checked) };
-    try {
-      await saveOrder(order); await refreshPoints();
-      showPaymentPanel(order);
-    } catch (error) { alert(error.message || "Could not save order."); }
+    const paymentModal = showPaymentPanel(order);
+    saveOrderIfLoggedIn(order, paymentModal);
   });
   update();
 }
